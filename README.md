@@ -1,34 +1,44 @@
 fk2trigger
 ==========
 
-NAME
-       fk2trigger - Convert InnoDB foreign keys to NDB with triggers
+## NAME
 
-SYNOPSIS
-       mysqldump <db> | fk2trigger [-e <engine>] [-t <trigger-file>]
+fk2trigger - Convert InnoDB foreign keys to NDB with triggers
 
-DESCRIPTION
-       fk2trigger takes output from mysqldump and converts foreign key constraints to triggers which mimic their behaviour. It also converts all table engines to the specified engine.
+## SYNOPSIS
 
-       This program was written to ease migration from InnoDB to MySQL Cluster.
+    mysqldump <db> | fk2trigger [-e <engine>] [-t <trigger-file>]
 
-OPTIONS
-       -e engine
-            All engine declarations will be replaced by the specified engine.  Defaults to 'NDBCLUSTER'.
+## DESCRIPTION
 
-       -t trigger-file
-            Write triggers to the specified file, for loading on other nodes in the MySQL Cluster. By default, triggers will be output on stdout, after the mysqldump output.
+fk2trigger takes output from mysqldump and converts foreign key constraints to triggers which mimic their behaviour. It also converts all table engines to the specified engine.
 
-VERSION
-       v0.01 - Initial release
+This program was written to ease migration from InnoDB to MySQL Cluster.
 
-AUTHOR
-       Dan Gardner (dan /at/ lizearle /dot/ com)
+## OPTIONS
 
-CREDITS
-       Released publicly by kind permission of my employer, Liz Earle Beauty Co. Ltd.
+    -e engine
 
-COPYRIGHT
-       Copyright (C) 2008, Liz Earle Beauty Co. Ltd.
+All engine declarations will be replaced by the specified engine.  Defaults to 'NDBCLUSTER'.
 
-       This work is licensed under the GNU General Public License version 3.  For the full license information, please visit http://www.gnu.org/copyleft/gpl.html
+    -t trigger-file
+
+Write triggers to the specified file, for loading on other nodes in the MySQL Cluster. By default, triggers will be output on stdout, after the mysqldump output.
+
+## VERSION
+
+v0.01 - Initial release
+
+## AUTHOR
+
+Dan Gardner (dan /at/ chaotica /dot/ org /dot/ uk)
+
+## CREDITS
+
+Released publicly by kind permission of my employer, Liz Earle Beauty Co. Ltd.
+
+## COPYRIGHT
+
+Copyright (C) 2008, Liz Earle Beauty Co. Ltd.
+
+This work is licensed under the GNU General Public License version 3.  For the full license information, please visit http://www.gnu.org/copyleft/gpl.html
