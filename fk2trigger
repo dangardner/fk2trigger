@@ -1,0 +1,255 @@
+#!/usr/bin/perl
+#
+# Convert an InnoDB dump containing foreign key constraints
+# to NDB/MyISAM with triggers to enforce referential integrity
+# and cascading updates and deletes.
+#
+
+=head1 NAME
+
+fk2trigger - Convert InnoDB foreign keys to NDB with triggers
+
+=head1 SYNOPSIS
+
+mysqldump <db> | B<fk2trigger> [-e <engine>] [-t <trigger-file>]
+
+=head1 DESCRIPTION
+
+I<fk2trigger> takes output from mysqldump and converts foreign key constraints
+to triggers which mimic their behaviour. It also converts all table engines to
+the specified engine.
+
+This program was written to ease migration from InnoDB to MySQL Cluster.
+
+=head1 OPTIONS
+
+=over 5
+
+=item B<-e engine>
+
+All engine declarations will be replaced by the specified engine.
+Defaults to 'NDBCLUSTER'.
+
+=item B<-t trigger-file>
+
+Write triggers to the specified file, for loading on other nodes in the MySQL
+Cluster. By default, triggers will be output on stdout, after the mysqldump
+output.
+
+=back
+
+=head1 VERSION
+
+v0.01 - Initial release
+
+=head1 AUTHOR
+
+Dan Gardner (dan /at/ lizearle /dot/ com)
+
+=head1 CREDITS
+
+Released publicly by kind permission of my employer, Liz Earle Beauty Co. Ltd.
+
+=head1 COPYRIGHT
+
+Copyright (C) 2008, Liz Earle Beauty Co. Ltd.
+
+This work is licensed under the GNU General Public License version 3.
+For the full license information, please visit http://www.gnu.org/copyleft/gpl.html
+
+=cut
+
+use strict;
+use warnings;
+
+use Getopt::Std;
+
+our $VERSION = '0.01';
+
+my %opts;
+
+$Getopt::Std::STANDARD_HELP_VERSION = 1;
+getopts('e:t:', \%opts);
+my $ENGINE = $opts{e} || 'NDBCLUSTER';
+my $TRIGGER_FILE = $opts{t};
+
+my %delete_trigger_map = (
+	'ON DELETE (?:RESTRICT|NO ACTION)'	=> \&trigger_delete_restrict,
+	'ON DELETE CASCADE'			=> \&trigger_delete_cascade,
+	'ON DELETE SET NULL'			=> \&trigger_delete_set_null,
+);
+my %update_trigger_map = (
+	'ON UPDATE (?:RESTRICT|NO ACTION)'	=> \&trigger_update_restrict,
+	'ON UPDATE CASCADE'			=> \&trigger_update_cascade,
+	'ON UPDATE SET NULL'			=> \&trigger_update_set_null,
+);
+
+my %triggers;
+my $trigger_number = 0; # counter to be appended to truncated trigger names to avoid collisions
+my $msg = "'Foreign Key Constraint Violated!'";
+
+my $table_name;
+while (my $line = <STDIN>) {
+	if ($line =~ m/^CREATE TABLE `([^`]+)`/) {
+		$table_name = $1;
+	}
+	if ($table_name) {
+		if (my @constraint = ($line =~ m/^ *CONSTRAINT `([^`]+)` FOREIGN KEY \(`([^`]+)`\) REFERENCES `([^`]+)` \(`([^`]+)`\)(.*)/)) {
+			unshift @constraint, $table_name;
+			create_triggers(@constraint);
+		}
+		if ($line =~ m/\) ENGINE=.*? /) {
+			$line =~ s/ ENGINE=.*? / ENGINE=$ENGINE /;
+		}
+		if ($line =~ m/;/) {
+			undef $table_name;
+		}
+	}
+	print $line;
+}
+
+output_triggers();
+
+sub output_triggers {
+	my $t = <<EOF;
+--
+-- fk2trigger: Table to hold error message when foreign key constraint is violated
+--
+
+DROP TABLE IF EXISTS `_error_msg`;
+
+CREATE TABLE `_error_msg` (
+	error_msg VARCHAR(32) NOT NULL PRIMARY KEY
+) ENGINE=$ENGINE DEFAULT CHARSET=utf8 COMMENT='Error message for foreign key constraint violations' ;
+
+INSERT INTO `_error_msg` VALUES ($msg);
+
+EOF
+	foreach my $table_name (sort keys %triggers) {
+		foreach my $trigger_type (sort keys %{$triggers{$table_name}}) {
+			my $trigger_name = name_trigger($table_name, $trigger_type);
+			$t .= <<EOF
+
+--
+-- fk2trigger: $table_name - $trigger_type
+--
+
+DROP TRIGGER IF EXISTS `$trigger_name`;
+
+DELIMITER //
+CREATE TRIGGER `$trigger_name`
+  $trigger_type ON $table_name
+  FOR EACH ROW
+  BEGIN
+@{[ join "\n", @{$triggers{$table_name}{$trigger_type}} ]}
+  END;
+//
+DELIMITER ;
+
+EOF
+		}
+	}
+
+	if ($TRIGGER_FILE) {
+		open FH, '>', $TRIGGER_FILE or die "Failed to open '$TRIGGER_FILE': $!\n";
+		print FH $t;
+		close FH;
+	} else {
+		print $t;
+	}
+}
+
+sub name_trigger {
+	my ($table_name, $type) = @_;
+	my $name = lc(join('_', $table_name, $type));
+	$name =~ s/\s+/_/g;
+	if (length($name) > 64) { # max length of trigger names is 64
+		my $id = sprintf("%04d", $trigger_number);
+		$trigger_number++;
+		$name =~ s/^(.{60}).*$/$1$id/;
+	}
+	return $name;
+}
+
+sub create_triggers {
+	my ($child_table, $symbol, $key, $parent_table, $fkey, $rest) = @_;
+	warn "Foreign key in same table: $child_table\n" if $child_table eq $parent_table;
+	my $base = <<EOF;
+    -- constraint `$symbol` in `$child_table`
+    IF new.$key IS NOT NULL AND (SELECT COUNT(*) FROM $parent_table WHERE $fkey=new.$key) = 0 THEN
+      INSERT INTO `_error_msg` VALUES ($msg);
+    END IF;
+EOF
+	push @{$triggers{$child_table}{'BEFORE INSERT'}}, $base;
+	push @{$triggers{$child_table}{'AFTER UPDATE'}}, $base;
+
+	# Delete triggers
+	my $dt;
+	foreach my $k (keys %delete_trigger_map) {
+		next unless $rest =~ m/$k/;
+		$delete_trigger_map{$k}($child_table, $symbol, $key, $parent_table, $fkey);
+		$dt = 1;
+	}
+	$dt or trigger_delete_restrict($child_table, $symbol, $key, $parent_table, $fkey);
+
+	# Update triggers
+	my $ut; 
+	foreach my $k (keys %update_trigger_map) {
+		next unless $rest =~ m/$k/;
+		$update_trigger_map{$k}($child_table, $symbol, $key, $parent_table, $fkey);
+		$ut = 1;
+	}
+	$ut or trigger_update_restrict($child_table, $symbol, $key, $parent_table, $fkey);
+}
+
+sub trigger_delete_restrict {
+	my ($child_table, $symbol, $key, $parent_table, $fkey) = @_;
+	push @{$triggers{$parent_table}{'BEFORE DELETE'}}, <<EOF
+    -- constraint `$symbol` in `$child_table` (ON DELETE RESTRICT)
+    IF old.$fkey IS NOT NULL AND (SELECT COUNT(*) FROM $child_table WHERE $key=old.$fkey) != 0 THEN
+      INSERT INTO `_error_msg` VALUES ($msg);
+    END IF;
+EOF
+}
+
+sub trigger_delete_cascade {
+	my ($child_table, $symbol, $key, $parent_table, $fkey) = @_;
+	push @{$triggers{$parent_table}{'BEFORE DELETE'}}, <<EOF
+    -- constraint `$symbol` in `$child_table` (ON DELETE CASCADE)
+    DELETE FROM $child_table WHERE $key=old.$fkey;
+EOF
+}
+
+sub trigger_delete_set_null {
+	my ($child_table, $symbol, $key, $parent_table, $fkey) = @_;
+	push @{$triggers{$parent_table}{'BEFORE DELETE'}}, <<EOF
+    -- constraint `$symbol` in `$child_table` (ON DELETE SET NULL)
+    UPDATE $child_table SET $key=NULL WHERE $key=old.$fkey;
+EOF
+}
+
+sub trigger_update_restrict {
+	my ($child_table, $symbol, $key, $parent_table, $fkey) = @_;
+	push @{$triggers{$parent_table}{'BEFORE UPDATE'}}, <<EOF
+    -- constraint `$symbol` in `$child_table` (ON UPDATE RESTRICT)
+    IF old.$fkey IS NOT NULL AND (SELECT COUNT(*) FROM $child_table WHERE $key=old.$fkey) != 0 THEN
+      INSERT INTO `_error_msg` VALUES ($msg);
+    END IF;
+EOF
+}
+
+sub trigger_update_cascade {
+	my ($child_table, $symbol, $key, $parent_table, $fkey) = @_;
+	push @{$triggers{$parent_table}{'BEFORE UPDATE'}}, <<EOF
+    -- constraint `$symbol` in `$child_table` (ON UPDATE CASCADE)
+    UPDATE $child_table SET $key=new.$fkey WHERE $key=old.$fkey;
+EOF
+}
+
+sub trigger_update_set_null {
+	my ($child_table, $symbol, $key, $parent_table, $fkey) = @_;
+	push @{$triggers{$parent_table}{'BEFORE UPDATE'}}, <<EOF
+    -- constraint `$symbol` in `$child_table` (ON UPDATE SET NULL)
+    UPDATE $child_table SET $key=NULL WHERE $key=old.$fkey;
+EOF
+}
